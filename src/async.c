@@ -1,0 +1,723 @@
+/* async.c — extracted from quickjs.c, lines 21046-21781, 53320-53330 */
+#include "quickjs-internal.h"
+
+void js_generator_finalizer(JSRuntime *rt, JSValue obj)
+{
+    JSGeneratorData *s = JS_GetOpaque(obj, JS_CLASS_GENERATOR);
+
+    if (s) {
+        free_generator_stack_rt(rt, s);
+        js_free_rt(rt, s);
+    }
+}
+
+static void free_generator_stack(JSContext *ctx, JSGeneratorData *s)
+{
+    free_generator_stack_rt(ctx->rt, s);
+}
+
+void js_generator_mark(JSRuntime *rt, JSValueConst val,
+                              JS_MarkFunc *mark_func)
+{
+    JSObject *p = JS_VALUE_GET_OBJ(val);
+    JSGeneratorData *s = p->u.generator_data;
+
+    if (!s || !s->func_state)
+        return;
+    mark_func(rt, &s->func_state->header);
+}
+
+/* XXX: use enum */
+
+static JSValue js_generator_next(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv,
+                                 BOOL *pdone, int magic)
+{
+    JSGeneratorData *s = JS_GetOpaque(this_val, JS_CLASS_GENERATOR);
+    JSStackFrame *sf;
+    JSValue ret, func_ret;
+
+    *pdone = TRUE;
+    if (!s)
+        return JS_ThrowTypeError(ctx, "not a generator");
+    switch(s->state) {
+    default:
+    case JS_GENERATOR_STATE_SUSPENDED_START:
+        sf = &s->func_state->frame;
+        if (magic == GEN_MAGIC_NEXT) {
+            goto exec_no_arg;
+        } else {
+            free_generator_stack(ctx, s);
+            goto done;
+        }
+        break;
+    case JS_GENERATOR_STATE_SUSPENDED_YIELD_STAR:
+    case JS_GENERATOR_STATE_SUSPENDED_YIELD:
+        sf = &s->func_state->frame;
+        /* cur_sp[-1] was set to JS_UNDEFINED in the previous call */
+        ret = JS_DupValue(ctx, argv[0]);
+        if (magic == GEN_MAGIC_THROW &&
+            s->state == JS_GENERATOR_STATE_SUSPENDED_YIELD) {
+            JS_Throw(ctx, ret);
+            s->func_state->throw_flag = TRUE;
+        } else {
+            sf->cur_sp[-1] = ret;
+            sf->cur_sp[0] = JS_NewInt32(ctx, magic);
+            sf->cur_sp++;
+        exec_no_arg:
+            s->func_state->throw_flag = FALSE;
+        }
+        s->state = JS_GENERATOR_STATE_EXECUTING;
+        func_ret = async_func_resume(ctx, s->func_state);
+        s->state = JS_GENERATOR_STATE_SUSPENDED_YIELD;
+        if (s->func_state->is_completed) {
+            /* finalize the execution in case of exception or normal return */
+            free_generator_stack(ctx, s);
+            return func_ret;
+        } else {
+            assert(JS_VALUE_GET_TAG(func_ret) == JS_TAG_INT);
+            /* get the returned yield value at the top of the stack */
+            ret = sf->cur_sp[-1];
+            sf->cur_sp[-1] = JS_UNDEFINED;
+            if (JS_VALUE_GET_INT(func_ret) == FUNC_RET_YIELD_STAR) {
+                s->state = JS_GENERATOR_STATE_SUSPENDED_YIELD_STAR;
+                /* return (value, done) object */
+                *pdone = 2;
+            } else {
+                *pdone = FALSE;
+            }
+        }
+        break;
+    case JS_GENERATOR_STATE_COMPLETED:
+    done:
+        /* execution is finished */
+        switch(magic) {
+        default:
+        case GEN_MAGIC_NEXT:
+            ret = JS_UNDEFINED;
+            break;
+        case GEN_MAGIC_RETURN:
+            ret = JS_DupValue(ctx, argv[0]);
+            break;
+        case GEN_MAGIC_THROW:
+            ret = JS_Throw(ctx, JS_DupValue(ctx, argv[0]));
+            break;
+        }
+        break;
+    case JS_GENERATOR_STATE_EXECUTING:
+        ret = JS_ThrowTypeError(ctx, "cannot invoke a running generator");
+        break;
+    }
+    return ret;
+}
+
+JSValue js_generator_function_call(JSContext *ctx, JSValueConst func_obj,
+                                          JSValueConst this_obj,
+                                          int argc, JSValueConst *argv,
+                                          int flags)
+{
+    JSValue obj, func_ret;
+    JSGeneratorData *s;
+
+    s = js_mallocz(ctx, sizeof(*s));
+    if (!s)
+        return JS_EXCEPTION;
+    s->state = JS_GENERATOR_STATE_SUSPENDED_START;
+    s->func_state = async_func_init(ctx, func_obj, this_obj, argc, argv);
+    if (!s->func_state) {
+        s->state = JS_GENERATOR_STATE_COMPLETED;
+        goto fail;
+    }
+
+    /* execute the function up to 'OP_initial_yield' */
+    func_ret = async_func_resume(ctx, s->func_state);
+    if (JS_IsException(func_ret))
+        goto fail;
+    JS_FreeValue(ctx, func_ret);
+
+    obj = js_create_from_ctor(ctx, func_obj, JS_CLASS_GENERATOR);
+    if (JS_IsException(obj))
+        goto fail;
+    JS_SetOpaque(obj, s);
+    return obj;
+ fail:
+    free_generator_stack_rt(ctx->rt, s);
+    js_free(ctx, s);
+    return JS_EXCEPTION;
+}
+
+/* AsyncFunction */
+
+void js_async_function_resolve_finalizer(JSRuntime *rt, JSValue val)
+{
+    JSObject *p = JS_VALUE_GET_OBJ(val);
+    JSAsyncFunctionState *s = p->u.async_function_data;
+    if (s) {
+        async_func_free(rt, s);
+    }
+}
+
+void js_async_function_resolve_mark(JSRuntime *rt, JSValueConst val,
+                                           JS_MarkFunc *mark_func)
+{
+    JSObject *p = JS_VALUE_GET_OBJ(val);
+    JSAsyncFunctionState *s = p->u.async_function_data;
+    if (s) {
+        mark_func(rt, &s->header);
+    }
+}
+
+static int js_async_function_resolve_create(JSContext *ctx,
+                                            JSAsyncFunctionState *s,
+                                            JSValue *resolving_funcs)
+{
+    int i;
+    JSObject *p;
+
+    for(i = 0; i < 2; i++) {
+        resolving_funcs[i] =
+            JS_NewObjectProtoClass(ctx, ctx->function_proto,
+                                   JS_CLASS_ASYNC_FUNCTION_RESOLVE + i);
+        if (JS_IsException(resolving_funcs[i])) {
+            if (i == 1)
+                JS_FreeValue(ctx, resolving_funcs[0]);
+            return -1;
+        }
+        p = JS_VALUE_GET_OBJ(resolving_funcs[i]);
+        js_rc(s)->ref_count++;
+        p->u.async_function_data = s;
+    }
+    return 0;
+}
+
+static void js_async_function_resume(JSContext *ctx, JSAsyncFunctionState *s)
+{
+    JSValue func_ret, ret2;
+
+    func_ret = async_func_resume(ctx, s);
+    if (s->is_completed) {
+        if (JS_IsException(func_ret)) {
+            JSValue error;
+        fail:
+            error = JS_GetException(ctx);
+            ret2 = JS_Call(ctx, s->resolving_funcs[1], JS_UNDEFINED,
+                           1, (JSValueConst *)&error);
+            JS_FreeValue(ctx, error);
+            JS_FreeValue(ctx, ret2); /* XXX: what to do if exception ? */
+        } else {
+            /* normal return */
+            ret2 = JS_Call(ctx, s->resolving_funcs[0], JS_UNDEFINED,
+                           1, (JSValueConst *)&func_ret);
+            JS_FreeValue(ctx, func_ret);
+            JS_FreeValue(ctx, ret2); /* XXX: what to do if exception ? */
+        }
+    } else {
+        JSValue value, promise, resolving_funcs[2], resolving_funcs1[2];
+        int i, res;
+
+        value = s->frame.cur_sp[-1];
+        s->frame.cur_sp[-1] = JS_UNDEFINED;
+
+        /* await */
+        JS_FreeValue(ctx, func_ret); /* not used */
+        promise = js_promise_resolve(ctx, ctx->promise_ctor,
+                                     1, (JSValueConst *)&value, 0);
+        JS_FreeValue(ctx, value);
+        if (JS_IsException(promise))
+            goto fail;
+        if (js_async_function_resolve_create(ctx, s, resolving_funcs)) {
+            JS_FreeValue(ctx, promise);
+            goto fail;
+        }
+
+        /* Note: no need to create 'thrownawayCapability' as in
+           the spec */
+        for(i = 0; i < 2; i++)
+            resolving_funcs1[i] = JS_UNDEFINED;
+        res = perform_promise_then(ctx, promise,
+                                   (JSValueConst *)resolving_funcs,
+                                   (JSValueConst *)resolving_funcs1);
+        JS_FreeValue(ctx, promise);
+        for(i = 0; i < 2; i++)
+            JS_FreeValue(ctx, resolving_funcs[i]);
+        if (res)
+            goto fail;
+    }
+}
+
+JSValue js_async_function_resolve_call(JSContext *ctx,
+                                              JSValueConst func_obj,
+                                              JSValueConst this_obj,
+                                              int argc, JSValueConst *argv,
+                                              int flags)
+{
+    JSObject *p = JS_VALUE_GET_OBJ(func_obj);
+    JSAsyncFunctionState *s = p->u.async_function_data;
+    BOOL is_reject = p->class_id - JS_CLASS_ASYNC_FUNCTION_RESOLVE;
+    JSValueConst arg;
+
+    if (argc > 0)
+        arg = argv[0];
+    else
+        arg = JS_UNDEFINED;
+    s->throw_flag = is_reject;
+    if (is_reject) {
+        JS_Throw(ctx, JS_DupValue(ctx, arg));
+    } else {
+        /* return value of await */
+        s->frame.cur_sp[-1] = JS_DupValue(ctx, arg);
+    }
+    js_async_function_resume(ctx, s);
+    return JS_UNDEFINED;
+}
+
+JSValue js_async_function_call(JSContext *ctx, JSValueConst func_obj,
+                                      JSValueConst this_obj,
+                                      int argc, JSValueConst *argv, int flags)
+{
+    JSValue promise;
+    JSAsyncFunctionState *s;
+
+    s = async_func_init(ctx, func_obj, this_obj, argc, argv);
+    if (!s)
+        return JS_EXCEPTION;
+
+    promise = JS_NewPromiseCapability(ctx, s->resolving_funcs);
+    if (JS_IsException(promise)) {
+        async_func_free(ctx->rt, s);
+        return JS_EXCEPTION;
+    }
+
+    js_async_function_resume(ctx, s);
+
+    async_func_free(ctx->rt, s);
+
+    return promise;
+}
+
+/* AsyncGenerator */
+
+
+
+
+static void js_async_generator_free(JSRuntime *rt,
+                                    JSAsyncGeneratorData *s)
+{
+    struct list_head *el, *el1;
+    JSAsyncGeneratorRequest *req;
+
+    list_for_each_safe(el, el1, &s->queue) {
+        req = list_entry(el, JSAsyncGeneratorRequest, link);
+        JS_FreeValueRT(rt, req->result);
+        JS_FreeValueRT(rt, req->promise);
+        JS_FreeValueRT(rt, req->resolving_funcs[0]);
+        JS_FreeValueRT(rt, req->resolving_funcs[1]);
+        js_free_rt(rt, req);
+    }
+    if (s->func_state)
+        async_func_free(rt, s->func_state);
+    js_free_rt(rt, s);
+}
+
+void js_async_generator_finalizer(JSRuntime *rt, JSValue obj)
+{
+    JSAsyncGeneratorData *s = JS_GetOpaque(obj, JS_CLASS_ASYNC_GENERATOR);
+
+    if (s) {
+        js_async_generator_free(rt, s);
+    }
+}
+
+void js_async_generator_mark(JSRuntime *rt, JSValueConst val,
+                                    JS_MarkFunc *mark_func)
+{
+    JSAsyncGeneratorData *s = JS_GetOpaque(val, JS_CLASS_ASYNC_GENERATOR);
+    struct list_head *el;
+    JSAsyncGeneratorRequest *req;
+    if (s) {
+        list_for_each(el, &s->queue) {
+            req = list_entry(el, JSAsyncGeneratorRequest, link);
+            JS_MarkValue(rt, req->result, mark_func);
+            JS_MarkValue(rt, req->promise, mark_func);
+            JS_MarkValue(rt, req->resolving_funcs[0], mark_func);
+            JS_MarkValue(rt, req->resolving_funcs[1], mark_func);
+        }
+        if (s->func_state) {
+            mark_func(rt, &s->func_state->header);
+        }
+    }
+}
+
+static JSValue js_async_generator_resolve_function(JSContext *ctx,
+                                          JSValueConst this_obj,
+                                          int argc, JSValueConst *argv,
+                                          int magic, JSValue *func_data);
+
+static int js_async_generator_resolve_function_create(JSContext *ctx,
+                                                      JSValueConst generator,
+                                                      JSValue *resolving_funcs,
+                                                      BOOL is_resume_next)
+{
+    int i;
+    JSValue func;
+
+    for(i = 0; i < 2; i++) {
+        func = JS_NewCFunctionData(ctx, js_async_generator_resolve_function, 1,
+                                   i + is_resume_next * 2, 1, &generator);
+        if (JS_IsException(func)) {
+            if (i == 1)
+                JS_FreeValue(ctx, resolving_funcs[0]);
+            return -1;
+        }
+        resolving_funcs[i] = func;
+    }
+    return 0;
+}
+
+static int js_async_generator_await(JSContext *ctx,
+                                    JSAsyncGeneratorData *s,
+                                    JSValueConst value)
+{
+    JSValue promise, resolving_funcs[2], resolving_funcs1[2];
+    int i, res;
+
+    promise = js_promise_resolve(ctx, ctx->promise_ctor,
+                                 1, &value, 0);
+    if (JS_IsException(promise))
+        goto fail;
+
+    if (js_async_generator_resolve_function_create(ctx, JS_MKPTR(JS_TAG_OBJECT, s->generator),
+                                                   resolving_funcs, FALSE)) {
+        JS_FreeValue(ctx, promise);
+        goto fail;
+    }
+
+    /* Note: no need to create 'thrownawayCapability' as in
+       the spec */
+    for(i = 0; i < 2; i++)
+        resolving_funcs1[i] = JS_UNDEFINED;
+    res = perform_promise_then(ctx, promise,
+                               (JSValueConst *)resolving_funcs,
+                               (JSValueConst *)resolving_funcs1);
+    JS_FreeValue(ctx, promise);
+    for(i = 0; i < 2; i++)
+        JS_FreeValue(ctx, resolving_funcs[i]);
+    if (res)
+        goto fail;
+    return 0;
+ fail:
+    return -1;
+}
+
+static void js_async_generator_resolve_or_reject(JSContext *ctx,
+                                                 JSAsyncGeneratorData *s,
+                                                 JSValueConst result,
+                                                 int is_reject)
+{
+    JSAsyncGeneratorRequest *next;
+    JSValue ret;
+
+    next = list_entry(s->queue.next, JSAsyncGeneratorRequest, link);
+    list_del(&next->link);
+    ret = JS_Call(ctx, next->resolving_funcs[is_reject], JS_UNDEFINED, 1,
+                  &result);
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, next->result);
+    JS_FreeValue(ctx, next->promise);
+    JS_FreeValue(ctx, next->resolving_funcs[0]);
+    JS_FreeValue(ctx, next->resolving_funcs[1]);
+    js_free(ctx, next);
+}
+
+static void js_async_generator_resolve(JSContext *ctx,
+                                       JSAsyncGeneratorData *s,
+                                       JSValueConst value,
+                                       BOOL done)
+{
+    JSValue result;
+    result = js_create_iterator_result(ctx, JS_DupValue(ctx, value), done);
+    /* XXX: better exception handling ? */
+    js_async_generator_resolve_or_reject(ctx, s, result, 0);
+    JS_FreeValue(ctx, result);
+ }
+
+static void js_async_generator_reject(JSContext *ctx,
+                                       JSAsyncGeneratorData *s,
+                                       JSValueConst exception)
+{
+    js_async_generator_resolve_or_reject(ctx, s, exception, 1);
+}
+
+static void js_async_generator_complete(JSContext *ctx,
+                                        JSAsyncGeneratorData *s)
+{
+    if (s->state != JS_ASYNC_GENERATOR_STATE_COMPLETED) {
+        s->state = JS_ASYNC_GENERATOR_STATE_COMPLETED;
+        async_func_free(ctx->rt, s->func_state);
+        s->func_state = NULL;
+    }
+}
+
+static int js_async_generator_completed_return(JSContext *ctx,
+                                               JSAsyncGeneratorData *s,
+                                               JSValueConst value)
+{
+    JSValue promise, resolving_funcs[2], resolving_funcs1[2];
+    int res;
+
+    // Can fail looking up JS_ATOM_constructor when is_reject==0.
+    promise = js_promise_resolve(ctx, ctx->promise_ctor, 1, &value,
+                                 /*is_reject*/0);
+    // A poisoned .constructor property is observable and the resulting
+    // exception should be delivered to the catch handler.
+    if (JS_IsException(promise)) {
+        JSValue err = JS_GetException(ctx);
+        promise = js_promise_resolve(ctx, ctx->promise_ctor, 1, (JSValueConst *)&err,
+                                     /*is_reject*/1);
+        JS_FreeValue(ctx, err);
+        if (JS_IsException(promise))
+            return -1;
+    }
+    if (js_async_generator_resolve_function_create(ctx,
+                                                   JS_MKPTR(JS_TAG_OBJECT, s->generator),
+                                                   resolving_funcs1,
+                                                   TRUE)) {
+        JS_FreeValue(ctx, promise);
+        return -1;
+    }
+    resolving_funcs[0] = JS_UNDEFINED;
+    resolving_funcs[1] = JS_UNDEFINED;
+    res = perform_promise_then(ctx, promise,
+                               (JSValueConst *)resolving_funcs1,
+                               (JSValueConst *)resolving_funcs);
+    JS_FreeValue(ctx, resolving_funcs1[0]);
+    JS_FreeValue(ctx, resolving_funcs1[1]);
+    JS_FreeValue(ctx, promise);
+    return res;
+}
+
+static void js_async_generator_resume_next(JSContext *ctx,
+                                           JSAsyncGeneratorData *s)
+{
+    JSAsyncGeneratorRequest *next;
+    JSValue func_ret, value;
+
+    for(;;) {
+        if (list_empty(&s->queue))
+            break;
+        next = list_entry(s->queue.next, JSAsyncGeneratorRequest, link);
+        switch(s->state) {
+        case JS_ASYNC_GENERATOR_STATE_EXECUTING:
+            /* only happens when restarting execution after await() */
+            goto resume_exec;
+        case JS_ASYNC_GENERATOR_STATE_AWAITING_RETURN:
+            goto done;
+        case JS_ASYNC_GENERATOR_STATE_SUSPENDED_START:
+            if (next->completion_type == GEN_MAGIC_NEXT) {
+                goto exec_no_arg;
+            } else {
+                js_async_generator_complete(ctx, s);
+            }
+            break;
+        case JS_ASYNC_GENERATOR_STATE_COMPLETED:
+            if (next->completion_type == GEN_MAGIC_NEXT) {
+                js_async_generator_resolve(ctx, s, JS_UNDEFINED, TRUE);
+            } else if (next->completion_type == GEN_MAGIC_RETURN) {
+                s->state = JS_ASYNC_GENERATOR_STATE_AWAITING_RETURN;
+                js_async_generator_completed_return(ctx, s, next->result);
+            } else {
+                js_async_generator_reject(ctx, s, next->result);
+            }
+            goto done;
+        case JS_ASYNC_GENERATOR_STATE_SUSPENDED_YIELD:
+        case JS_ASYNC_GENERATOR_STATE_SUSPENDED_YIELD_STAR:
+            value = JS_DupValue(ctx, next->result);
+            if (next->completion_type == GEN_MAGIC_THROW &&
+                s->state == JS_ASYNC_GENERATOR_STATE_SUSPENDED_YIELD) {
+                JS_Throw(ctx, value);
+                s->func_state->throw_flag = TRUE;
+            } else {
+                /* 'yield' returns a value. 'yield *' also returns a value
+                   in case the 'throw' method is called */
+                s->func_state->frame.cur_sp[-1] = value;
+                s->func_state->frame.cur_sp[0] =
+                    JS_NewInt32(ctx, next->completion_type);
+                s->func_state->frame.cur_sp++;
+            exec_no_arg:
+                s->func_state->throw_flag = FALSE;
+            }
+            s->state = JS_ASYNC_GENERATOR_STATE_EXECUTING;
+        resume_exec:
+            func_ret = async_func_resume(ctx, s->func_state);
+            if (s->func_state->is_completed) {
+                if (JS_IsException(func_ret)) {
+                    value = JS_GetException(ctx);
+                    js_async_generator_complete(ctx, s);
+                    js_async_generator_reject(ctx, s, value);
+                    JS_FreeValue(ctx, value);
+                } else {
+                    /* end of function */
+                    js_async_generator_complete(ctx, s);
+                    js_async_generator_resolve(ctx, s, func_ret, TRUE);
+                    JS_FreeValue(ctx, func_ret);
+                }
+            } else {
+                int func_ret_code, ret;
+                assert(JS_VALUE_GET_TAG(func_ret) == JS_TAG_INT);
+                func_ret_code = JS_VALUE_GET_INT(func_ret);
+                value = s->func_state->frame.cur_sp[-1];
+                s->func_state->frame.cur_sp[-1] = JS_UNDEFINED;
+                switch(func_ret_code) {
+                case FUNC_RET_YIELD:
+                case FUNC_RET_YIELD_STAR:
+                    if (func_ret_code == FUNC_RET_YIELD_STAR)
+                        s->state = JS_ASYNC_GENERATOR_STATE_SUSPENDED_YIELD_STAR;
+                    else
+                        s->state = JS_ASYNC_GENERATOR_STATE_SUSPENDED_YIELD;
+                    js_async_generator_resolve(ctx, s, value, FALSE);
+                    JS_FreeValue(ctx, value);
+                    break;
+                case FUNC_RET_AWAIT:
+                    ret = js_async_generator_await(ctx, s, value);
+                    JS_FreeValue(ctx, value);
+                    if (ret < 0) {
+                        /* exception: throw it */
+                        s->func_state->throw_flag = TRUE;
+                        goto resume_exec;
+                    }
+                    goto done;
+                default:
+                    abort();
+                }
+            }
+            break;
+        default:
+            abort();
+        }
+    }
+ done: ;
+}
+
+static JSValue js_async_generator_resolve_function(JSContext *ctx,
+                                                   JSValueConst this_obj,
+                                                   int argc, JSValueConst *argv,
+                                                   int magic, JSValue *func_data)
+{
+    BOOL is_reject = magic & 1;
+    JSAsyncGeneratorData *s = JS_GetOpaque(func_data[0], JS_CLASS_ASYNC_GENERATOR);
+    JSValueConst arg = argv[0];
+
+    /* XXX: what if s == NULL */
+
+    if (magic >= 2) {
+        /* resume next case in AWAITING_RETURN state */
+        assert(s->state == JS_ASYNC_GENERATOR_STATE_AWAITING_RETURN ||
+               s->state == JS_ASYNC_GENERATOR_STATE_COMPLETED);
+        s->state = JS_ASYNC_GENERATOR_STATE_COMPLETED;
+        if (is_reject) {
+            js_async_generator_reject(ctx, s, arg);
+        } else {
+            js_async_generator_resolve(ctx, s, arg, TRUE);
+        }
+    } else if (s->state == JS_ASYNC_GENERATOR_STATE_EXECUTING) {
+        /* restart function execution after await() */
+        s->func_state->throw_flag = is_reject;
+        if (is_reject) {
+            JS_Throw(ctx, JS_DupValue(ctx, arg));
+        } else {
+            /* return value of await */
+            s->func_state->frame.cur_sp[-1] = JS_DupValue(ctx, arg);
+        }
+        js_async_generator_resume_next(ctx, s);
+    }
+    return JS_UNDEFINED;
+}
+
+/* magic = GEN_MAGIC_x */
+JSValue js_async_generator_next(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv,
+                                       int magic)
+{
+    JSAsyncGeneratorData *s = JS_GetOpaque(this_val, JS_CLASS_ASYNC_GENERATOR);
+    JSValue promise, resolving_funcs[2];
+    JSAsyncGeneratorRequest *req;
+
+    promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise))
+        return JS_EXCEPTION;
+    if (!s) {
+        JSValue err, res2;
+        JS_ThrowTypeError(ctx, "not an AsyncGenerator object");
+        err = JS_GetException(ctx);
+        res2 = JS_Call(ctx, resolving_funcs[1], JS_UNDEFINED,
+                       1, (JSValueConst *)&err);
+        JS_FreeValue(ctx, err);
+        JS_FreeValue(ctx, res2);
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        return promise;
+    }
+    req = js_mallocz(ctx, sizeof(*req));
+    if (!req)
+        goto fail;
+    req->completion_type = magic;
+    req->result = JS_DupValue(ctx, argv[0]);
+    req->promise = JS_DupValue(ctx, promise);
+    req->resolving_funcs[0] = resolving_funcs[0];
+    req->resolving_funcs[1] = resolving_funcs[1];
+    list_add_tail(&req->link, &s->queue);
+    if (s->state != JS_ASYNC_GENERATOR_STATE_EXECUTING) {
+        js_async_generator_resume_next(ctx, s);
+    }
+    return promise;
+ fail:
+    JS_FreeValue(ctx, resolving_funcs[0]);
+    JS_FreeValue(ctx, resolving_funcs[1]);
+    JS_FreeValue(ctx, promise);
+    return JS_EXCEPTION;
+}
+
+JSValue js_async_generator_function_call(JSContext *ctx, JSValueConst func_obj,
+                                                JSValueConst this_obj,
+                                                int argc, JSValueConst *argv,
+                                                int flags)
+{
+    JSValue obj, func_ret;
+    JSAsyncGeneratorData *s;
+
+    s = js_mallocz(ctx, sizeof(*s));
+    if (!s)
+        return JS_EXCEPTION;
+    s->state = JS_ASYNC_GENERATOR_STATE_SUSPENDED_START;
+    init_list_head(&s->queue);
+    s->func_state = async_func_init(ctx, func_obj, this_obj, argc, argv);
+    if (!s->func_state)
+        goto fail;
+    /* execute the function up to 'OP_initial_yield' (no yield nor
+       await are possible) */
+    func_ret = async_func_resume(ctx, s->func_state);
+    if (JS_IsException(func_ret))
+        goto fail;
+    JS_FreeValue(ctx, func_ret);
+
+    obj = js_create_from_ctor(ctx, func_obj, JS_CLASS_ASYNC_GENERATOR);
+    if (JS_IsException(obj))
+        goto fail;
+    s->generator = JS_VALUE_GET_OBJ(obj);
+    JS_SetOpaque(obj, s);
+    return obj;
+ fail:
+    js_async_generator_free(ctx->rt, s);
+    return JS_EXCEPTION;
+}
+/* Generator */
+const JSCFunctionListEntry js_generator_function_proto_funcs[] = {
+    JS_PROP_STRING_DEF("[Symbol.toStringTag]", "GeneratorFunction", JS_PROP_CONFIGURABLE),
+};
+
+const JSCFunctionListEntry js_generator_proto_funcs[] = {
+    JS_ITERATOR_NEXT_DEF("next", 1, js_generator_next, GEN_MAGIC_NEXT ),
+    JS_ITERATOR_NEXT_DEF("return", 1, js_generator_next, GEN_MAGIC_RETURN ),
+    JS_ITERATOR_NEXT_DEF("throw", 1, js_generator_next, GEN_MAGIC_THROW ),
+    JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Generator", JS_PROP_CONFIGURABLE),
+};
