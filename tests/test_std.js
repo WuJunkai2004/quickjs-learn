@@ -2,6 +2,8 @@
 import * as std from "std";
 import * as os from "os";
 
+const isWin = os.platform === "win32";
+
 function assert(actual, expected, message) {
     if (arguments.length == 1)
         expected = true;
@@ -156,7 +158,9 @@ function test_os()
 {
     var fd, fpath, fname, fdir, buf, buf2, i, files, err, fdate, st, link_path;
 
-    const stdinIsTTY = !os.exec(["/bin/sh", "-c", "test -t 0"], { usePath: false });
+    /* Windows 没有 /bin/sh 可供交叉验证，直接以 isatty 结果为准 */
+    const stdinIsTTY = isWin ? !!os.isatty(0)
+        : !os.exec(["/bin/sh", "-c", "test -t 0"], { usePath: false });
 
     assert(os.isatty(0), stdinIsTTY, `isatty(STDIN)`);
 
@@ -209,18 +213,21 @@ function test_os()
     assert(st.mode & os.S_IFMT, os.S_IFREG);
     assert(st.mtime, fdate);
 
-    err = os.symlink(fname, link_path);
-    assert(err === 0);
+    /* symlink/lstat/readlink 未在 Windows 上提供（需要特权创建符号链接） */
+    if (!isWin) {
+        err = os.symlink(fname, link_path);
+        assert(err === 0);
 
-    [st, err] = os.lstat(link_path);
-    assert(err, 0);
-    assert(st.mode & os.S_IFMT, os.S_IFLNK);
+        [st, err] = os.lstat(link_path);
+        assert(err, 0);
+        assert(st.mode & os.S_IFMT, os.S_IFLNK);
 
-    [buf, err] = os.readlink(link_path);
-    assert(err, 0);
-    assert(buf, fname);
+        [buf, err] = os.readlink(link_path);
+        assert(err, 0);
+        assert(buf, fname);
 
-    assert(os.remove(link_path) === 0);
+        assert(os.remove(link_path) === 0);
+    }
 
     [buf, err] = os.getcwd();
     assert(err, 0);
@@ -242,36 +249,72 @@ function test_os_exec()
 {
     var ret, fds, pid, f, status;
 
-    ret = os.exec(["true"]);
-    assert(ret, 0);
+    if (isWin) {
+        const cmd = std.getenv("ComSpec") || "cmd.exe";
 
-    ret = os.exec(["/bin/sh", "-c", "exit 1"], { usePath: false });
-    assert(ret, 1);
+        ret = os.exec([cmd, "/c", "exit 0"]);
+        assert(ret, 0);
 
-    fds = os.pipe();
-    pid = os.exec(["sh", "-c", "echo $FOO"], {
-        stdout: fds[1],
-        block: false,
-        env: { FOO: "hello" },
-    } );
-    assert(pid >= 0);
-    os.close(fds[1]); /* close the write end (as it is only in the child)  */
-    f = std.fdopen(fds[0], "r");
-    assert(f.getline(), "hello");
-    assert(f.getline(), null);
-    f.close();
-    [ret, status] = os.waitpid(pid, 0);
-    assert(ret, pid);
-    assert(status & 0x7f, 0); /* exited */
-    assert(status >> 8, 0); /* exit code */
+        ret = os.exec([cmd, "/c", "exit 1"], { usePath: false });
+        assert(ret, 1);
 
-    pid = os.exec(["cat"], { block: false } );
-    assert(pid >= 0);
-    os.kill(pid, os.SIGTERM);
-    [ret, status] = os.waitpid(pid, 0);
-    assert(ret, pid);
-    assert(status !== 0, true, `expect nonzero exit code (got ${status})`);
-    assert(status & 0x7f, os.SIGTERM);
+        fds = os.pipe();
+        pid = os.exec([cmd, "/c", "echo %FOO%"], {
+            stdout: fds[1],
+            block: false,
+            env: { FOO: "hello" },
+        } );
+        assert(pid >= 0);
+        os.close(fds[1]); /* close the write end (as it is only in the child)  */
+        f = std.fdopen(fds[0], "r");
+        /* cmd 的 echo 输出 CRLF 行尾 */
+        assert(f.getline().replace(/\r$/, ""), "hello");
+        assert(f.getline(), null);
+        f.close();
+        [ret, status] = os.waitpid(pid, 0);
+        assert(ret, pid);
+        assert(status & 0x7f, 0); /* exited */
+        assert(status >> 8, 0); /* exit code */
+
+        pid = os.exec([cmd, "/c", "pause"], { block: false } );
+        assert(pid >= 0);
+        os.kill(pid, os.SIGTERM);
+        [ret, status] = os.waitpid(pid, 0);
+        assert(ret, pid);
+        assert(status !== 0, true, `expect nonzero exit code (got ${status})`);
+        assert(status & 0x7f, os.SIGTERM);
+    } else {
+        ret = os.exec(["true"]);
+        assert(ret, 0);
+
+        ret = os.exec(["/bin/sh", "-c", "exit 1"], { usePath: false });
+        assert(ret, 1);
+
+        fds = os.pipe();
+        pid = os.exec(["sh", "-c", "echo $FOO"], {
+            stdout: fds[1],
+            block: false,
+            env: { FOO: "hello" },
+        } );
+        assert(pid >= 0);
+        os.close(fds[1]); /* close the write end (as it is only in the child)  */
+        f = std.fdopen(fds[0], "r");
+        assert(f.getline(), "hello");
+        assert(f.getline(), null);
+        f.close();
+        [ret, status] = os.waitpid(pid, 0);
+        assert(ret, pid);
+        assert(status & 0x7f, 0); /* exited */
+        assert(status >> 8, 0); /* exit code */
+
+        pid = os.exec(["cat"], { block: false } );
+        assert(pid >= 0);
+        os.kill(pid, os.SIGTERM);
+        [ret, status] = os.waitpid(pid, 0);
+        assert(ret, pid);
+        assert(status !== 0, true, `expect nonzero exit code (got ${status})`);
+        assert(status & 0x7f, os.SIGTERM);
+    }
 }
 
 function test_timer()

@@ -41,6 +41,8 @@
 #include <windows.h>
 #include <conio.h>
 #include <utime.h>
+#include <io.h>
+#include <process.h>
 #else
 #include <dlfcn.h>
 #include <termios.h>
@@ -2419,15 +2421,49 @@ static int handle_posted_message(JSRuntime *rt, JSContext *ctx,
 
 #if defined(_WIN32)
 
+/* js_os_poll() 轮询管道数据的分片时长（毫秒） */
+#define PIPE_POLL_SLICE_MS 10
+
+/* 找出已有数据的管道读句柄。匿名管道是同步句柄，WaitForSingleObject
+   对其恒为有信号态，必须用 PeekNamedPipe 探测；对端已关闭（broken
+   pipe）或非管道非控制台句柄（文件等）视为可读 */
+static JSOSRWHandler *js_os_poll_peek_ready(JSThreadState *ts)
+{
+    struct list_head *el;
+    list_for_each(el, &ts->os_rw_handlers) {
+        JSOSRWHandler *rh = list_entry(el, JSOSRWHandler, link);
+        if (!JS_IsNull(rh->rw_func[0])) {
+            HANDLE h = (HANDLE)_get_osfhandle(rh->fd);
+            DWORD avail = 0;
+            if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+                if (GetFileType(h) == FILE_TYPE_CHAR)
+                    continue; /* 控制台句柄由等待集处理 */
+                return rh;
+            }
+            if (avail > 0)
+                return rh;
+        }
+    }
+    return NULL;
+}
+
 static int js_os_poll(JSContext *ctx)
 {
     JSRuntime *rt = JS_GetRuntime(ctx);
     JSThreadState *ts = JS_GetRuntimeOpaque(rt);
-    int min_delay, count;
-    int64_t cur_time, delay;
+    int min_delay, count, i;
+    int64_t cur_time, delay, deadline;
     JSOSRWHandler *rh;
+    JSWorkerMessageHandler *port;
     struct list_head *el;
-    HANDLE handles[MAXIMUM_WAIT_OBJECTS]; // 64
+    /* 与 handles[] 平行的事件来源：rh 非 NULL 为 stdin 读句柄就绪，
+       port 非 NULL 为 worker 管道有消息 */
+    struct {
+        HANDLE handle;
+        JSOSRWHandler *rh;
+        JSWorkerMessageHandler *port;
+    } entries[MAXIMUM_WAIT_OBJECTS];
+    HANDLE handles[MAXIMUM_WAIT_OBJECTS];
 
     /* XXX: handle signals if useful */
 
@@ -2435,7 +2471,7 @@ static int js_os_poll(JSContext *ctx)
         list_empty(&ts->port_list)) {
         return -1; /* no more events */
     }
-    
+
     if (!list_empty(&ts->os_timers)) {
         cur_time = get_time_ms();
         min_delay = 10000;
@@ -2452,64 +2488,102 @@ static int js_os_poll(JSContext *ctx)
                 JS_FreeValue(ctx, func);
                 return 0;
             } else if (delay < min_delay) {
-                min_delay = delay;
+                min_delay = (int)delay;
             }
         }
     } else {
         min_delay = -1;
     }
 
-    count = 0;
+    /* 1) 管道读句柄：有数据（或 EOF）即调用 */
+    rh = js_os_poll_peek_ready(ts);
+    if (rh) {
+        call_handler(ctx, rh->rw_func[0]);
+        /* must stop because the list may have been modified */
+        return 0;
+    }
+
+    /* 2) 写句柄：匿名管道写端在缓冲未满时始终可写（与 POSIX 的
+          POLLOUT 语义一致），直接就绪 */
     list_for_each(el, &ts->os_rw_handlers) {
         rh = list_entry(el, JSOSRWHandler, link);
-        if (rh->fd == 0 && !JS_IsNull(rh->rw_func[0])) {
-            handles[count++] = (HANDLE)_get_osfhandle(rh->fd); // stdin
-            if (count == (int)countof(handles))
-                break;
+        if (!JS_IsNull(rh->rw_func[1])) {
+            call_handler(ctx, rh->rw_func[1]);
+            /* must stop because the list may have been modified */
+            return 0;
         }
     }
 
-    list_for_each(el, &ts->port_list) {
-        JSWorkerMessageHandler *port = list_entry(el, JSWorkerMessageHandler, link);
-        if (JS_IsNull(port->on_message_func))
-            continue;
-        handles[count++] = port->recv_pipe->waker.handle;
-        if (count == (int)countof(handles))
-            break;
-    }
+    /* 3) 无立即就绪事件：分片等待。控制台 stdin 与 worker 端口事件
+          句柄可阻塞等待；管道数据以 PIPE_POLL_SLICE_MS 粒度轮询 */
+    deadline = min_delay;
+    for(;;) {
+        DWORD slice = PIPE_POLL_SLICE_MS;
 
-    if (count > 0) {
-        DWORD ret, timeout = INFINITE;
-        if (min_delay != -1)
-            timeout = min_delay;
-        ret = WaitForMultipleObjects(count, handles, FALSE, timeout);
+        count = 0;
+        list_for_each(el, &ts->os_rw_handlers) {
+            rh = list_entry(el, JSOSRWHandler, link);
+            if (!JS_IsNull(rh->rw_func[0]) &&
+                count < (int)countof(entries)) {
+                HANDLE h = (HANDLE)_get_osfhandle(rh->fd);
+                /* 仅控制台句柄可用 WaitForSingleObject 等待输入 */
+                if (GetFileType(h) == FILE_TYPE_CHAR) {
+                    entries[count].handle = h;
+                    entries[count].rh = rh;
+                    entries[count].port = NULL;
+                    count++;
+                }
+            }
+        }
 
-        if (ret < count) {
-            list_for_each(el, &ts->os_rw_handlers) {
-                rh = list_entry(el, JSOSRWHandler, link);
-                if (rh->fd == 0 && !JS_IsNull(rh->rw_func[0])) {
-                    call_handler(ctx, rh->rw_func[0]);
+        list_for_each(el, &ts->port_list) {
+            port = list_entry(el, JSWorkerMessageHandler, link);
+            if (!JS_IsNull(port->on_message_func) &&
+                count < (int)countof(entries)) {
+                entries[count].handle = port->recv_pipe->waker.handle;
+                entries[count].rh = NULL;
+                entries[count].port = port;
+                count++;
+            }
+        }
+
+        if (deadline != -1) {
+            if (deadline <= 0)
+                return 0; /* timer 到期，交由外层循环处理 */
+            slice = min_int((int)deadline, PIPE_POLL_SLICE_MS);
+        }
+
+        if (count > 0) {
+            DWORD wr;
+            for(i = 0; i < count; i++)
+                handles[i] = entries[i].handle;
+            wr = WaitForMultipleObjects(count, handles, FALSE, slice);
+            if (wr < WAIT_OBJECT_0 + (DWORD)count) {
+                int idx = wr - WAIT_OBJECT_0;
+                if (entries[idx].rh != NULL) {
+                    call_handler(ctx, entries[idx].rh->rw_func[0]);
                     /* must stop because the list may have been modified */
-                    goto done;
+                    return 0;
                 }
+                if (entries[idx].port != NULL &&
+                    handle_posted_message(rt, ctx, entries[idx].port))
+                    return 0;
             }
-
-            list_for_each(el, &ts->port_list) {
-                JSWorkerMessageHandler *port = list_entry(el, JSWorkerMessageHandler, link);
-                if (!JS_IsNull(port->on_message_func)) {
-                    JSWorkerMessagePipe *ps = port->recv_pipe;
-                    if (ps->waker.handle == handles[ret]) {
-                        if (handle_posted_message(rt, ctx, port))
-                            goto done;
-                    }
-                }
-            }
+        } else {
+            Sleep(slice);
         }
-    } else {
-        Sleep(min_delay);
+
+        if (deadline != -1)
+            deadline -= slice;
+
+        /* 分片结束后重扫管道数据 */
+        rh = js_os_poll_peek_ready(ts);
+        if (rh) {
+            call_handler(ctx, rh->rw_func[0]);
+            /* must stop because the list may have been modified */
+            return 0;
+        }
     }
- done:
-    return 0;
 }
 
 #else
@@ -2987,51 +3061,6 @@ static JSValue js_os_realpath(JSContext *ctx, JSValueConst this_val,
     return make_string_error(ctx, buf, err);
 }
 
-#if !defined(_WIN32)
-static JSValue js_os_symlink(JSContext *ctx, JSValueConst this_val,
-                             int argc, JSValueConst *argv)
-{
-    const char *target, *linkpath;
-    int err;
-
-    target = JS_ToCString(ctx, argv[0]);
-    if (!target)
-        return JS_EXCEPTION;
-    linkpath = JS_ToCString(ctx, argv[1]);
-    if (!linkpath) {
-        JS_FreeCString(ctx, target);
-        return JS_EXCEPTION;
-    }
-    err = js_get_errno(symlink(target, linkpath));
-    JS_FreeCString(ctx, target);
-    JS_FreeCString(ctx, linkpath);
-    return JS_NewInt32(ctx, err);
-}
-
-/* return [path, errorcode] */
-static JSValue js_os_readlink(JSContext *ctx, JSValueConst this_val,
-                              int argc, JSValueConst *argv)
-{
-    const char *path;
-    char buf[PATH_MAX];
-    int err;
-    ssize_t res;
-
-    path = JS_ToCString(ctx, argv[0]);
-    if (!path)
-        return JS_EXCEPTION;
-    res = readlink(path, buf, sizeof(buf) - 1);
-    if (res < 0) {
-        buf[0] = '\0';
-        err = errno;
-    } else {
-        buf[res] = '\0';
-        err = 0;
-    }
-    JS_FreeCString(ctx, path);
-    return make_string_error(ctx, buf, err);
-}
-
 static char **build_envp(JSContext *ctx, JSValueConst obj)
 {
     uint32_t len, i;
@@ -3089,6 +3118,51 @@ static char **build_envp(JSContext *ctx, JSValueConst obj)
     goto done;
 }
 
+#if !defined(_WIN32)
+static JSValue js_os_symlink(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv)
+{
+    const char *target, *linkpath;
+    int err;
+
+    target = JS_ToCString(ctx, argv[0]);
+    if (!target)
+        return JS_EXCEPTION;
+    linkpath = JS_ToCString(ctx, argv[1]);
+    if (!linkpath) {
+        JS_FreeCString(ctx, target);
+        return JS_EXCEPTION;
+    }
+    err = js_get_errno(symlink(target, linkpath));
+    JS_FreeCString(ctx, target);
+    JS_FreeCString(ctx, linkpath);
+    return JS_NewInt32(ctx, err);
+}
+
+/* return [path, errorcode] */
+static JSValue js_os_readlink(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv)
+{
+    const char *path;
+    char buf[PATH_MAX];
+    int err;
+    ssize_t res;
+
+    path = JS_ToCString(ctx, argv[0]);
+    if (!path)
+        return JS_EXCEPTION;
+    res = readlink(path, buf, sizeof(buf) - 1);
+    if (res < 0) {
+        buf[0] = '\0';
+        err = errno;
+    } else {
+        buf[res] = '\0';
+        err = 0;
+    }
+    JS_FreeCString(ctx, path);
+    return make_string_error(ctx, buf, err);
+}
+
 /* execvpe is not available on non GNU systems */
 static int my_execvpe(const char *filename, char **argv, char **envp)
 {
@@ -3144,6 +3218,264 @@ static int my_execvpe(const char *filename, char **argv, char **envp)
         errno = EACCES;
     return -1;
 }
+#endif /* !defined(_WIN32) */
+
+#if defined(_WIN32)
+
+#ifndef WNOHANG
+#define WNOHANG 1
+#endif
+
+/* os.exec() 的子进程句柄表：Windows 没有 waitpid(pid)，CreateProcessW
+   返回的 HANDLE 需按 pid 记账，供 os.waitpid()/os.kill() 使用 */
+typedef struct JSWinProcess {
+    int pid;
+    HANDLE handle;
+    int killed_sig; /* os.kill() 传入的信号，waitpid 时用于状态编码 */
+} JSWinProcess;
+
+static SRWLOCK js_win_process_lock = SRWLOCK_INIT;
+static JSWinProcess *js_win_process_tab;
+static size_t js_win_process_tab_size, js_win_process_tab_count;
+
+static void js_win_process_add(int pid, HANDLE handle, int killed_sig)
+{
+    AcquireSRWLockExclusive(&js_win_process_lock);
+    if (js_win_process_tab_count == js_win_process_tab_size) {
+        size_t new_size = max_int(js_win_process_tab_size * 2, 8);
+        JSWinProcess *tab = realloc(js_win_process_tab,
+                                    new_size * sizeof(*tab));
+        if (tab) {
+            js_win_process_tab = tab;
+            js_win_process_tab_size = new_size;
+        }
+    }
+    if (js_win_process_tab_count < js_win_process_tab_size) {
+        JSWinProcess *p = &js_win_process_tab[js_win_process_tab_count++];
+        p->pid = pid;
+        p->handle = handle;
+        p->killed_sig = killed_sig;
+    } else {
+        CloseHandle(handle); /* 内存不足，放弃跟踪该进程 */
+    }
+    ReleaseSRWLockExclusive(&js_win_process_lock);
+}
+
+/* 按 pid 摘除表项；找不到返回 FALSE */
+static BOOL js_win_process_remove(int pid, HANDLE *phandle, int *pkilled_sig)
+{
+    size_t i;
+    BOOL found = FALSE;
+    AcquireSRWLockExclusive(&js_win_process_lock);
+    for(i = 0; i < js_win_process_tab_count; i++) {
+        if (js_win_process_tab[i].pid == pid) {
+            *phandle = js_win_process_tab[i].handle;
+            *pkilled_sig = js_win_process_tab[i].killed_sig;
+            memmove(&js_win_process_tab[i], &js_win_process_tab[i + 1],
+                    (js_win_process_tab_count - i - 1) *
+                    sizeof(*js_win_process_tab));
+            js_win_process_tab_count--;
+            found = TRUE;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&js_win_process_lock);
+    return found;
+}
+
+static HANDLE js_win_process_find(int pid, int *pkilled_sig)
+{
+    size_t i;
+    HANDLE handle = NULL;
+    AcquireSRWLockShared(&js_win_process_lock);
+    for(i = 0; i < js_win_process_tab_count; i++) {
+        if (js_win_process_tab[i].pid == pid) {
+            handle = js_win_process_tab[i].handle;
+            *pkilled_sig = js_win_process_tab[i].killed_sig;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&js_win_process_lock);
+    return handle;
+}
+
+static void js_win_process_set_killed(int pid, int sig)
+{
+    size_t i;
+    AcquireSRWLockExclusive(&js_win_process_lock);
+    for(i = 0; i < js_win_process_tab_count; i++) {
+        if (js_win_process_tab[i].pid == pid) {
+            js_win_process_tab[i].killed_sig = sig;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&js_win_process_lock);
+}
+
+/* utf8 字符串 -> UTF-16（malloc 分配，失败返回 NULL） */
+static wchar_t *js_win_utf8_to_wide(const char *str)
+{
+    int len;
+    wchar_t *wstr;
+    len = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
+    if (len <= 0)
+        return NULL;
+    wstr = malloc(sizeof(wchar_t) * len);
+    if (!wstr)
+        return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, str, -1, wstr, len) != len) {
+        free(wstr);
+        return NULL;
+    }
+    return wstr;
+}
+
+/* 按 Windows 命令行规则转义单个参数（参见 MSDN "Parsing C++
+   Command-Line Arguments"），追加到 DynBuf */
+static void js_win_quote_arg(const char *str, DynBuf *dcmd)
+{
+    size_t i, n_backslash;
+    BOOL need_quotes;
+
+    need_quotes = str[0] == '\0' || strpbrk(str, " \t\v\"");
+    if (need_quotes)
+        dbuf_putc(dcmd, '\"');
+    n_backslash = 0;
+    for(i = 0; str[i] != '\0'; i++) {
+        if (str[i] == '\\') {
+            n_backslash++;
+        } else if (str[i] == '\"') {
+            dbuf_put(dcmd, (const uint8_t *)"\\\\", 2 * n_backslash + 1);
+            dbuf_putc(dcmd, '\"');
+            n_backslash = 0;
+        } else {
+            dbuf_put(dcmd, (const uint8_t *)"\\", n_backslash);
+            n_backslash = 0;
+            dbuf_putc(dcmd, str[i]);
+        }
+    }
+    dbuf_put(dcmd, (const uint8_t *)"\\", n_backslash * (need_quotes ? 2 : 1));
+    if (need_quotes)
+        dbuf_putc(dcmd, '\"');
+}
+
+/* char *envp[] -> CreateProcessW 的 Unicode 环境块（"NAME=v\0...\0\0"），
+   失败返回 NULL */
+static wchar_t *js_win_build_envblock(char *const envp[])
+{
+    char *const *e;
+    wchar_t *block, *p;
+    size_t cap = 4;
+
+    for(e = envp; *e != NULL; e++)
+        cap += strlen(*e) * 2 + 2;
+    block = malloc(cap * sizeof(wchar_t));
+    if (!block)
+        return NULL;
+    p = block;
+    for(e = envp; *e != NULL; e++) {
+        int len = MultiByteToWideChar(CP_UTF8, 0, *e, -1, p,
+                                      (int)(cap - (size_t)(p - block)));
+        if (len <= 0) {
+            free(block);
+            return NULL;
+        }
+        p += len; /* len 含结尾 L'\0' */
+    }
+    *p = L'\0'; /* 环境块以两个连续空串结尾 */
+    return block;
+}
+
+/* Windows 版 fork/exec：CreateProcessW。
+   返回：block 为真 -> 子进程退出码；为假 -> 子进程 pid；失败 -> -1 */
+static int js_win_spawn(const char **exec_argv, const char *file,
+                        const char *cwd, char **envp, BOOL use_path,
+                        BOOL block_flag, const int *std_fds)
+{
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DynBuf dcmd;
+    wchar_t *wcmdline = NULL, *wapp = NULL, *wcwd = NULL, *wenv = NULL;
+    const char *app;
+    DWORD creation_flags = 0;
+    BOOL redirect = FALSE, inherit = FALSE;
+    int i, ret = -1;
+
+    app = file ? file : exec_argv[0];
+
+    dbuf_init(&dcmd);
+    for(i = 0; exec_argv[i] != NULL; i++) {
+        if (i != 0)
+            dbuf_putc(&dcmd, ' ');
+        js_win_quote_arg(exec_argv[i], &dcmd);
+    }
+    dbuf_putc(&dcmd, '\0');
+    if (dbuf_error(&dcmd))
+        goto done;
+    wcmdline = js_win_utf8_to_wide((const char *)dcmd.buf);
+    if (!wcmdline)
+        goto done;
+    /* usePath=false：lpApplicationName 给完整路径，不做 PATH 搜索 */
+    if (!use_path) {
+        wapp = js_win_utf8_to_wide(app);
+        if (!wapp)
+            goto done;
+    }
+    if (cwd) {
+        wcwd = js_win_utf8_to_wide(cwd);
+        if (!wcwd)
+            goto done;
+    }
+    if (envp) {
+        wenv = js_win_build_envblock(envp);
+        if (!wenv)
+            goto done;
+        creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+    }
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    for(i = 0; i < 3; i++) {
+        if (std_fds[i] != i) {
+            redirect = TRUE;
+            break;
+        }
+    }
+    if (redirect) {
+        /* os.pipe() 的句柄由 _pipe() 创建为可继承，bInheritHandles=TRUE
+           才能把重定向句柄传给子进程 */
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        si.hStdInput = (HANDLE)_get_osfhandle(std_fds[0]);
+        si.hStdOutput = (HANDLE)_get_osfhandle(std_fds[1]);
+        si.hStdError = (HANDLE)_get_osfhandle(std_fds[2]);
+        inherit = TRUE;
+    }
+
+    if (!CreateProcessW(wapp, wcmdline, NULL, NULL, inherit,
+                        creation_flags, wenv, wcwd, &si, &pi))
+        goto done;
+    CloseHandle(pi.hThread);
+    if (block_flag) {
+        DWORD exit_code = (DWORD)-1;
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        if (!GetExitCodeProcess(pi.hProcess, &exit_code))
+            exit_code = (DWORD)-1;
+        CloseHandle(pi.hProcess);
+        ret = (int)exit_code;
+    } else {
+        int pid = (int)GetProcessId(pi.hProcess);
+        js_win_process_add(pid, pi.hProcess, 0);
+        ret = pid;
+    }
+ done:
+    dbuf_free(&dcmd);
+    free(wcmdline);
+    free(wapp);
+    free(wcwd);
+    free(wenv);
+    return ret;
+}
+#endif /* defined(_WIN32) */
 
 /* exec(args[, options]) -> exitcode */
 static JSValue js_os_exec(JSContext *ctx, JSValueConst this_val,
@@ -3154,7 +3486,10 @@ static JSValue js_os_exec(JSContext *ctx, JSValueConst this_val,
     const char **exec_argv, *file = NULL, *str, *cwd = NULL;
     char **envp = environ;
     uint32_t exec_argc, i;
-    int ret, pid, status;
+    int ret;
+#if !defined(_WIN32)
+    int pid, status;
+#endif
     BOOL block_flag = TRUE, use_path = TRUE;
     static const char *std_name[3] = { "stdin", "stdout", "stderr" };
     int std_fds[3];
@@ -3264,6 +3599,17 @@ static JSValue js_os_exec(JSContext *ctx, JSValueConst this_val,
         }
     }
 
+#if defined(_WIN32)
+    (void)uid;
+    (void)gid;
+    ret = js_win_spawn(exec_argv, file, cwd, envp, use_path, block_flag,
+                       std_fds);
+    if (ret < 0) {
+        JS_ThrowTypeError(ctx, "could not execute '%s'",
+                          file ? file : exec_argv[0]);
+        goto exception;
+    }
+#else
     pid = fork();
     if (pid < 0) {
         JS_ThrowTypeError(ctx, "fork error");
@@ -3339,6 +3685,7 @@ static JSValue js_os_exec(JSContext *ctx, JSValueConst this_val,
     } else {
         ret = pid;
     }
+#endif /* defined(_WIN32) */
     ret_val = JS_NewInt32(ctx, ret);
  done:
     JS_FreeCString(ctx, file);
@@ -3365,7 +3712,11 @@ static JSValue js_os_exec(JSContext *ctx, JSValueConst this_val,
 static JSValue js_os_getpid(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv)
 {
+#if defined(_WIN32)
+    return JS_NewInt32(ctx, _getpid());
+#else
     return JS_NewInt32(ctx, getpid());
+#endif
 }
 
 /* waitpid(pid, block) -> [pid, status] */
@@ -3380,11 +3731,45 @@ static JSValue js_os_waitpid(JSContext *ctx, JSValueConst this_val,
     if (JS_ToInt32(ctx, &options, argv[1]))
         return JS_EXCEPTION;
 
+#if defined(_WIN32)
+    {
+        HANDLE handle;
+        int killed_sig;
+
+        if (!js_win_process_remove(pid, &handle, &killed_sig)) {
+            ret = -ESRCH;
+            status = 0;
+            goto build_result;
+        }
+        if (options & WNOHANG) {
+            if (WaitForSingleObject(handle, 0) == WAIT_TIMEOUT) {
+                /* 仍在运行：放回表项（保留 killed_sig） */
+                js_win_process_add(pid, handle, killed_sig);
+                ret = 0;
+                status = 0;
+                goto build_result;
+            }
+        } else {
+            WaitForSingleObject(handle, INFINITE);
+        }
+        {
+            DWORD exit_code = 0;
+            GetExitCodeProcess(handle, &exit_code);
+            /* POSIX 风格状态编码：被 kill 的低 7 位为信号，正常退出为
+               退出码左移 8 位（与 WIFEXITED/WIFSIGNALED 宏对齐） */
+            status = killed_sig ? killed_sig : (int)(exit_code << 8);
+        }
+        CloseHandle(handle);
+        ret = pid;
+    }
+ build_result:
+#else
     ret = waitpid(pid, &status, options);
     if (ret < 0) {
         ret = -errno;
         status = 0;
     }
+#endif
 
     obj = JS_NewArray(ctx);
     if (JS_IsException(obj))
@@ -3403,7 +3788,12 @@ static JSValue js_os_pipe(JSContext *ctx, JSValueConst this_val,
     int pipe_fds[2], ret;
     JSValue obj;
 
+#if defined(_WIN32)
+    /* O_BINARY：字节流；默认可继承（os.exec() 重定向需要） */
+    ret = _pipe(pipe_fds, 0, O_BINARY);
+#else
     ret = pipe(pipe_fds);
+#endif
     if (ret < 0)
         return JS_NULL;
     obj = JS_NewArray(ctx);
@@ -3426,10 +3816,27 @@ static JSValue js_os_kill(JSContext *ctx, JSValueConst this_val,
         return JS_EXCEPTION;
     if (JS_ToInt32(ctx, &sig, argv[1]))
         return JS_EXCEPTION;
+#if defined(_WIN32)
+    {
+        int killed_sig;
+        HANDLE handle = js_win_process_find(pid, &killed_sig);
+        if (!handle)
+            return JS_NewInt32(ctx, -ESRCH);
+        /* 只能终止（无信号语义）；退出码传信号值，waitpid 据此编码状态 */
+        if (!TerminateProcess(handle, sig)) {
+            ret = -1;
+        } else {
+            js_win_process_set_killed(pid, sig);
+            ret = 0;
+        }
+    }
+#else
     ret = js_get_errno(kill(pid, sig));
+#endif
     return JS_NewInt32(ctx, ret);
 }
 
+#if !defined(_WIN32)
 /* dup(fd) */
 static JSValue js_os_dup(JSContext *ctx, JSValueConst this_val,
                          int argc, JSValueConst *argv)
@@ -3998,12 +4405,14 @@ static const JSCFunctionListEntry js_os_funcs[] = {
     JS_CFUNC_MAGIC_DEF("lstat", 1, js_os_stat, 1 ),
     JS_CFUNC_DEF("symlink", 2, js_os_symlink ),
     JS_CFUNC_DEF("readlink", 1, js_os_readlink ),
+#endif
     JS_CFUNC_DEF("exec", 1, js_os_exec ),
     JS_CFUNC_DEF("getpid", 0, js_os_getpid ),
     JS_CFUNC_DEF("waitpid", 2, js_os_waitpid ),
     OS_FLAG(WNOHANG),
     JS_CFUNC_DEF("pipe", 0, js_os_pipe ),
     JS_CFUNC_DEF("kill", 2, js_os_kill ),
+#if !defined(_WIN32)
     JS_CFUNC_DEF("dup", 1, js_os_dup ),
     JS_CFUNC_DEF("dup2", 2, js_os_dup2 ),
 #endif
