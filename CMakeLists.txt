@@ -39,7 +39,8 @@ set(CMAKE_C_FLAGS_DEBUG "-O0 -g")
 
 # ---- static library: libquickjs.a ----
 # src/*.c GLOB 覆盖核心 16 模块 + cutils/dtoa/libregexp/libunicode/
-# quickjs-libc + repl.c（qjsc 生成物，gitignored）
+# quickjs-libc（repl.c 为 qjsc 生成物，gitignored，由下方 custom command
+# 生成并编入 qjs 目标，不进库以免循环依赖）
 file(GLOB QUICKJS_CORE_SOURCES CONFIGURE_DEPENDS src/*.c)
 file(GLOB QUICKJS_BUILTIN_SOURCES CONFIGURE_DEPENDS src/builtins/*.c)
 add_library(quickjs STATIC
@@ -59,9 +60,19 @@ else()
   set(QUICKJS_LIBS quickjs m pthread dl)
 endif()
 
+# ---- repl.c: qjsc-generated REPL bytecode (Makefile: repl.c: qjsc repl.js) ----
+# 生成物放 build 目录（不放 src/：GLOB 会把它卷进 quickjs 库，
+# 形成 repl.c -> qjsc -> libquickjs -> repl.c 循环依赖）
+set(REPL_C ${CMAKE_CURRENT_BINARY_DIR}/repl.c)
+add_custom_command(
+  OUTPUT ${REPL_C}
+  COMMAND $<TARGET_FILE:qjsc> -c -o ${REPL_C} -m ${CMAKE_CURRENT_SOURCE_DIR}/repl.js
+  DEPENDS qjsc ${CMAKE_CURRENT_SOURCE_DIR}/repl.js
+  COMMENT "qjsc: generating repl.c from repl.js"
+  VERBATIM)
+
 # ---- qjs CLI ----
-# repl.o 已随 src/repl.c 进入静态库（qjsc_repl/qjsc_repl_size 符号）
-add_executable(qjs qjs.c)
+add_executable(qjs qjs.c ${REPL_C})
 target_link_libraries(qjs PRIVATE ${QUICKJS_LIBS})
 
 # ---- qjsc compiler ----

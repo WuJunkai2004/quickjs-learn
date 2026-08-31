@@ -1546,9 +1546,9 @@ typedef enum JSStrictEqModeEnum {
 } JSStrictEqModeEnum;
 
 /* 类的 exotic 方法表（定义于各模块，此处声明） */
-const JSClassExoticMethods js_arguments_exotic_methods;
-const JSClassExoticMethods js_string_exotic_methods;
-const JSClassExoticMethods js_module_ns_exotic_methods;
+extern const JSClassExoticMethods js_arguments_exotic_methods;
+extern const JSClassExoticMethods js_string_exotic_methods;
+extern const JSClassExoticMethods js_module_ns_exotic_methods;
 
 extern const JSOpCode opcode_info[OP_COUNT + (OP_TEMP_END - OP_TEMP_START)];
 
