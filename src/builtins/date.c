@@ -1,5 +1,5 @@
 /* date.c — extracted from quickjs.c, lines 47450-47551, 55013-56178 */
-#include "../quickjs-internal.h"
+#include "quickjs-internal.h"
 
 /* Date */
 

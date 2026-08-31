@@ -1,5 +1,5 @@
 /* promise.c — extracted from quickjs.c, lines 53332-54716 */
-#include "../quickjs-internal.h"
+#include "quickjs-internal.h"
 
 /* 前向声明（源自 quickjs.c 头部声明块） */
 static void js_promise_resolve_function_finalizer(JSRuntime *rt, JSValue val);

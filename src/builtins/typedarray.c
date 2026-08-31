@@ -1,5 +1,5 @@
 /* typedarray.c — extracted from quickjs.c, lines 56731-61131 */
-#include "../quickjs-internal.h"
+#include "quickjs-internal.h"
 
 /* 前向声明（源自 quickjs.c 头部声明块） */
 static int typed_array_init(JSContext *ctx, JSValueConst obj, JSValue buffer, uint64_t offset, uint64_t len, BOOL track_rab);

@@ -1,5 +1,5 @@
 /* object.c — extracted from quickjs.c, lines 39964-41667, 50410-50576, 51566-51893 */
-#include "../quickjs-internal.h"
+#include "quickjs-internal.h"
 
 /* 前向声明（源自 quickjs.c 头部声明块） */
 static JSValue js_error_toString(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);

@@ -1,5 +1,5 @@
 /* jstring.c — extracted from quickjs.c, lines 45176-46950 */
-#include "../quickjs-internal.h"
+#include "quickjs-internal.h"
 
 /* String */
 

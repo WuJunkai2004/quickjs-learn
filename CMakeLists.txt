@@ -38,21 +38,23 @@ set(CMAKE_C_FLAGS_RELEASE "-O2")
 set(CMAKE_C_FLAGS_DEBUG "-O0 -g")
 
 # ---- static library: libquickjs.a ----
+# src/*.c GLOB 覆盖核心 16 模块 + cutils/dtoa/libregexp/libunicode/
+# quickjs-libc + repl.c（qjsc 生成物，gitignored）
 file(GLOB QUICKJS_CORE_SOURCES CONFIGURE_DEPENDS src/*.c)
 file(GLOB QUICKJS_BUILTIN_SOURCES CONFIGURE_DEPENDS src/builtins/*.c)
 add_library(quickjs STATIC
   ${QUICKJS_CORE_SOURCES}
   ${QUICKJS_BUILTIN_SOURCES}
-  cutils.c dtoa.c libregexp.c libunicode.c quickjs-libc.c
 )
-# 注意：不加 -I src / -I src/builtins —— 曾有 src/string.h、src/builtins/string.h
-# 遮蔽系统 <string.h> 的隐患，已分别改名 cstring / jstring；其余模块头名也
-# 不与系统头冲突。内部一律用 #include "..."（先搜当前文件目录）或相对路径
-# #include "../quickjs-internal.h" 互相引用。
-target_include_directories(quickjs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# include/ 存放全部头（quickjs.h 公共 API + 内部头 + builtins/ 子结构）；
+# 无系统头同名文件（string.h 隐患已改名 cstring.h / jstring.h），
+# 故 -I include 安全。根目录入口（qjs.c/qjsc.c/run-test262.c）通过链接
+# 本库获得 PUBLIC include path 解析 quickjs.h/cutils.h 等。
+target_include_directories(quickjs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # ---- qjs CLI ----
-add_executable(qjs qjs.c repl.c)
+# repl.o 已随 src/repl.c 进入静态库（qjsc_repl/qjsc_repl_size 符号）
+add_executable(qjs qjs.c)
 target_link_libraries(qjs PRIVATE quickjs m pthread dl)
 
 # ---- qjsc compiler ----

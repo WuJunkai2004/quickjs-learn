@@ -1,5 +1,5 @@
 /* array.c — extracted from quickjs.c, lines 41669-44907 */
-#include "../quickjs-internal.h"
+#include "quickjs-internal.h"
 
 JSValue js_array_constructor(JSContext *ctx, JSValueConst new_target,
                                     int argc, JSValueConst *argv)

@@ -1,5 +1,5 @@
 /* regexp.c — extracted from quickjs.c, lines 47552-49316 */
-#include "../quickjs-internal.h"
+#include "quickjs-internal.h"
 
 /* 前向声明（源自 quickjs.c 头部声明块） */
 static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern, JSValueConst flags);
