@@ -1,6 +1,6 @@
-/* builtin_typedarray.h — builtin_typedarray.c 导出符号声明（自动生成自 quickjs.c） */
-#ifndef QUICKJS_BUILTIN_TYPEDARRAY_H
-#define QUICKJS_BUILTIN_TYPEDARRAY_H
+/* typedarray.h — typedarray.c 导出符号声明（自动生成自 quickjs.c） */
+#ifndef QUICKJS_BUILTINS_TYPEDARRAY_H
+#define QUICKJS_BUILTINS_TYPEDARRAY_H
 
 BOOL array_buffer_is_resizable(const JSArrayBuffer *abuf);
 BOOL typed_array_is_oob(JSObject *p);
@@ -17,4 +17,4 @@ void js_array_buffer_free(JSRuntime *rt, void *opaque, void *ptr);
 void js_typed_array_finalizer(JSRuntime *rt, JSValue val);
 void js_typed_array_mark(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_func);
 
-#endif /* QUICKJS_BUILTIN_TYPEDARRAY_H */
+#endif /* QUICKJS_BUILTINS_TYPEDARRAY_H */

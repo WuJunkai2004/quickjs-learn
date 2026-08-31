@@ -1,5 +1,5 @@
-/* builtin_global.c — extracted from quickjs.c, lines 54718-55012 */
-#include "quickjs-internal.h"
+/* global.c — extracted from quickjs.c, lines 54718-55012 */
+#include "../quickjs-internal.h"
 
 /* URI handling */
 

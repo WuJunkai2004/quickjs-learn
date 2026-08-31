@@ -1,5 +1,5 @@
-/* builtin_proxy.c — extracted from quickjs.c, lines 50578-51564 */
-#include "quickjs-internal.h"
+/* proxy.c — extracted from quickjs.c, lines 50578-51564 */
+#include "../quickjs-internal.h"
 
 /* 前向声明（源自 quickjs.c 头部声明块） */
 static void js_proxy_finalizer(JSRuntime *rt, JSValue val);

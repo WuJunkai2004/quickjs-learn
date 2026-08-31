@@ -1,4 +1,4 @@
-/* string.c — extracted from quickjs.c, lines 3923-5130 */
+/* cstring.c — extracted from quickjs.c, lines 3923-5130 */
 #include "quickjs-internal.h"
 
 JSValue js_new_string8_len(JSContext *ctx, const char *buf, int len)

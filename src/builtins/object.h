@@ -1,6 +1,6 @@
-/* builtin_object.h — builtin_object.c 导出符号声明（自动生成自 quickjs.c） */
-#ifndef QUICKJS_BUILTIN_OBJECT_H
-#define QUICKJS_BUILTIN_OBJECT_H
+/* object.h — object.c 导出符号声明（自动生成自 quickjs.c） */
+#ifndef QUICKJS_BUILTINS_OBJECT_H
+#define QUICKJS_BUILTINS_OBJECT_H
 
 BOOL js_weakref_is_live(JSValueConst val);
 BOOL js_weakref_is_target(JSValueConst val);
@@ -36,4 +36,4 @@ int js_obj_to_desc(JSContext *ctx, JSPropertyDescriptor *d, JSValueConst desc);
 void free_arg_list(JSContext *ctx, JSValue *tab, uint32_t len);
 void js_weakref_free(JSRuntime *rt, JSValue val);
 
-#endif /* QUICKJS_BUILTIN_OBJECT_H */
+#endif /* QUICKJS_BUILTINS_OBJECT_H */

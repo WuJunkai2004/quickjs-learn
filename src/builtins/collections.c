@@ -1,5 +1,5 @@
-/* builtin_collections.c — extracted from quickjs.c, lines 51895-53318, 61133-61424 */
-#include "quickjs-internal.h"
+/* collections.c — extracted from quickjs.c, lines 51895-53318, 61133-61424 */
+#include "../quickjs-internal.h"
 
 /* hash multipliers, same as the Linux kernel (see Knuth vol 3,
    section 6.4, exercise 9) */

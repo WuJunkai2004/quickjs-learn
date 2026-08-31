@@ -39,12 +39,16 @@ set(CMAKE_C_FLAGS_DEBUG "-O0 -g")
 
 # ---- static library: libquickjs.a ----
 file(GLOB QUICKJS_CORE_SOURCES CONFIGURE_DEPENDS src/*.c)
+file(GLOB QUICKJS_BUILTIN_SOURCES CONFIGURE_DEPENDS src/builtins/*.c)
 add_library(quickjs STATIC
   ${QUICKJS_CORE_SOURCES}
+  ${QUICKJS_BUILTIN_SOURCES}
   cutils.c dtoa.c libregexp.c libunicode.c quickjs-libc.c
 )
-# 注意：不加 -I src —— src/string.h 会遮蔽系统 <string.h>；
-# src/ 内部用 #include "..."（先搜当前文件目录）即可找到彼此。
+# 注意：不加 -I src / -I src/builtins —— 曾有 src/string.h、src/builtins/string.h
+# 遮蔽系统 <string.h> 的隐患，已分别改名 cstring / jstring；其余模块头名也
+# 不与系统头冲突。内部一律用 #include "..."（先搜当前文件目录）或相对路径
+# #include "../quickjs-internal.h" 互相引用。
 target_include_directories(quickjs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # ---- qjs CLI ----

@@ -1,5 +1,5 @@
-/* builtin_json.c — extracted from quickjs.c, lines 49317-50408 */
-#include "quickjs-internal.h"
+/* json.c — extracted from quickjs.c, lines 49317-50408 */
+#include "../quickjs-internal.h"
 
 /* JSON */
 

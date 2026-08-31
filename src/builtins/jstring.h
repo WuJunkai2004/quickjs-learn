@@ -1,6 +1,6 @@
-/* builtin_string.h — builtin_string.c 导出符号声明（自动生成自 quickjs.c） */
-#ifndef QUICKJS_BUILTIN_STRING_H
-#define QUICKJS_BUILTIN_STRING_H
+/* jstring.h — jstring.c 导出符号声明（自动生成自 quickjs.c） */
+#ifndef QUICKJS_BUILTINS_JSTRING_H
+#define QUICKJS_BUILTINS_JSTRING_H
 
 JSValue js_string_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv);
 double js_fmax(double a, double b);
@@ -14,4 +14,4 @@ int js_string_find_invalid_codepoint(JSString *p);
 int string_indexof_char(JSString *p, int c, int from);
 int64_t string_advance_index(JSString *p, int64_t index, BOOL unicode);
 
-#endif /* QUICKJS_BUILTIN_STRING_H */
+#endif /* QUICKJS_BUILTINS_JSTRING_H */

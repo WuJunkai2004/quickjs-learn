@@ -1,6 +1,6 @@
-/* string.h — string.c 导出符号声明（自动生成自 quickjs.c） */
-#ifndef QUICKJS_STRING_H
-#define QUICKJS_STRING_H
+/* cstring.h — cstring.c 导出符号声明（自动生成自 quickjs.c） */
+#ifndef QUICKJS_CSTRING_H
+#define QUICKJS_CSTRING_H
 
 BOOL JS_ConcatStringInPlace(JSContext *ctx, JSString *p1, JSValueConst op2);
 BOOL js_string_eq(JSContext *ctx, const JSString *p1, const JSString *p2);
@@ -30,4 +30,4 @@ int string_getc(const JSString *p, int *pidx);
 int string_rope_get(JSValueConst val, uint32_t idx);
 void string_buffer_free(StringBuffer *s);
 
-#endif /* QUICKJS_STRING_H */
+#endif /* QUICKJS_CSTRING_H */

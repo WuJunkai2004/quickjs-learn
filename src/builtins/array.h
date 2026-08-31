@@ -1,6 +1,6 @@
-/* builtin_array.h — builtin_array.c 导出符号声明（自动生成自 quickjs.c） */
-#ifndef QUICKJS_BUILTIN_ARRAY_H
-#define QUICKJS_BUILTIN_ARRAY_H
+/* array.h — array.c 导出符号声明（自动生成自 quickjs.c） */
+#ifndef QUICKJS_BUILTINS_ARRAY_H
+#define QUICKJS_BUILTINS_ARRAY_H
 
 JSValue js_array_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv);
 JSValue js_array_every(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int special);
@@ -36,4 +36,4 @@ void js_iterator_helper_mark(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_
 void js_iterator_wrap_finalizer(JSRuntime *rt, JSValue val);
 void js_iterator_wrap_mark(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_func);
 
-#endif /* QUICKJS_BUILTIN_ARRAY_H */
+#endif /* QUICKJS_BUILTINS_ARRAY_H */

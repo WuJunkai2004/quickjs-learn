@@ -31,3 +31,4 @@ run_sunspider_like
 libwinpthread*.dll
 build/
 build-*/
+.cache/

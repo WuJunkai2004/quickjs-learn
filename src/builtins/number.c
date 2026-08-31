@@ -1,5 +1,5 @@
-/* builtin_number.c — extracted from quickjs.c, lines 44909-45174, 46952-47448 */
-#include "quickjs-internal.h"
+/* number.c — extracted from quickjs.c, lines 44909-45174, 46952-47448 */
+#include "../quickjs-internal.h"
 
 const JSCFunctionListEntry js_number_funcs[] = {
     /* global ParseInt and parseFloat should be defined already or delayed */
