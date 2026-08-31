@@ -52,20 +52,28 @@ add_library(quickjs STATIC
 # 本库获得 PUBLIC include path 解析 quickjs.h/cutils.h 等。
 target_include_directories(quickjs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# ---- link libs (Makefile:256-261 LIBS=-lm -lpthread, + -ldl unless WIN32) ----
+if(WIN32)
+  set(QUICKJS_LIBS quickjs m pthread)
+else()
+  set(QUICKJS_LIBS quickjs m pthread dl)
+endif()
+
 # ---- qjs CLI ----
 # repl.o 已随 src/repl.c 进入静态库（qjsc_repl/qjsc_repl_size 符号）
 add_executable(qjs qjs.c)
-target_link_libraries(qjs PRIVATE quickjs m pthread dl)
+target_link_libraries(qjs PRIVATE ${QUICKJS_LIBS})
 
 # ---- qjsc compiler ----
 add_executable(qjsc qjsc.c)
+# Makefile: QJSC_CC=$(CC) —— qjsc 产出的构建脚本引用本机构建器，勿写死
 target_compile_definitions(qjsc PRIVATE
-  CONFIG_CC="cc" CONFIG_PREFIX="/usr/local")
-target_link_libraries(qjsc PRIVATE quickjs m pthread dl)
+  CONFIG_CC="${CMAKE_C_COMPILER}" CONFIG_PREFIX="/usr/local")
+target_link_libraries(qjsc PRIVATE ${QUICKJS_LIBS})
 
 # ---- run-test262 (optional; cmake --build build --target run-test262) ----
 add_executable(run-test262 EXCLUDE_FROM_ALL run-test262.c)
-target_link_libraries(run-test262 PRIVATE quickjs m pthread dl)
+target_link_libraries(run-test262 PRIVATE ${QUICKJS_LIBS})
 
 # ---- tests (Makefile `make test` equivalent) ----
 enable_testing()
