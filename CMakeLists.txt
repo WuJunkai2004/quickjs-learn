@@ -32,6 +32,21 @@ add_compile_options(
 )
 # No CMAKE_C_STANDARD: original Makefile sets none (GNU extensions in use).
 
+# ---- 32bit x86: FP rounding (Makefile:139-141 CONFIG_M32 段) ----
+# 原 Makefile 在 CONFIG_M32 时加 -msse2 -mfpmath=sse，注释是
+# "use SSE math for correct FP rounding"。i686 默认 -mfpmath=387，double
+# 中间结果留在 80 位 x87 寄存器里不按 double 舍入，date.c set_date_fields()
+# 里 volatile 只保护了加数、保护不了累加器，导致 Date.UTC 求值顺序失效
+# （test262 fp-evaluation-order，见 tests/test_builtin.js）。
+# 探测式：只在 32 位 x86 且编译器认这两个标志时启用，非 x86 不用也用不了。
+if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(i[3-6]86|x86|X86)$")
+  include(CheckCCompilerFlag)
+  check_c_compiler_flag("-msse2 -mfpmath=sse" HAVE_SSE2_FPMATH)
+  if(HAVE_SSE2_FPMATH)
+    add_compile_options(-msse2 -mfpmath=sse)
+  endif()
+endif()
+
 # ---- LTO/IPO: keep cross-module inlining after the quickjs.c split ----
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 set(CMAKE_C_FLAGS_RELEASE "-O2")

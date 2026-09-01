@@ -1564,8 +1564,16 @@ extern const JSOpCode opcode_info[OP_COUNT + (OP_TEMP_END - OP_TEMP_START)];
 #define DEFINE_GLOBAL_LEX_VAR (1 << 7)
 #define DEFINE_GLOBAL_FUNC_VAR (1 << 6)
 #define JS_BIGINT_MAX_SIZE ((1024 * 1024) / JS_LIMB_BITS) /* in limbs */
+/* it is currently assumed that JS_SHORT_BIG_INT_BITS = JS_LIMB_BITS */
+#if JS_SHORT_BIG_INT_BITS == 32
+#define JS_SHORT_BIG_INT_MIN INT32_MIN
+#define JS_SHORT_BIG_INT_MAX INT32_MAX
+#elif JS_SHORT_BIG_INT_BITS == 64
 #define JS_SHORT_BIG_INT_MIN INT64_MIN
 #define JS_SHORT_BIG_INT_MAX INT64_MAX
+#else
+#error unsupported
+#endif
 #define ATOD_INT_ONLY        (1 << 0)
 #define ATOD_ACCEPT_BIN_OCT  (1 << 2)
 #define ATOD_ACCEPT_LEGACY_OCTAL  (1 << 4)

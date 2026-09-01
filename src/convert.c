@@ -186,15 +186,6 @@ int skip_spaces(const char *pc)
 /* bigint support */
 
 
-/* it is currently assumed that JS_SHORT_BIG_INT_BITS = JS_LIMB_BITS */
-#if JS_SHORT_BIG_INT_BITS == 32
-#define JS_SHORT_BIG_INT_MIN INT32_MIN
-#define JS_SHORT_BIG_INT_MAX INT32_MAX
-#elif JS_SHORT_BIG_INT_BITS == 64
-#else
-#error unsupported
-#endif
-
 #define ADDC(res, carry_out, op1, op2, carry_in)        \
 do {                                                    \
     js_limb_t __v, __a, __k, __k1;                      \
