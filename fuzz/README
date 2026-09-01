@@ -1,27 +1,31 @@
 libFuzzer support for QuickJS
 =============================
 
-Build QuickJS with libFuzzer support as follows:
+Build the fuzzing targets with CMake. clang is required: it is the compiler that
+ships the libFuzzer runtime.
 
-  CONFIG_CLANG=y make libfuzzer
+  cmake -B build -DQUICKJS_FUZZER=ON -DCMAKE_C_COMPILER=clang
+  cmake --build build
 
 This can be extended with sanitizer support to improve efficacy:
 
-  CONFIG_CLANG=y CONFIG_ASAN=y make libfuzzer
+  cmake -B build -DQUICKJS_FUZZER=ON -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_C_FLAGS="-fsanitize=address" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
 
 
-Currently, there are three fuzzing targets defined: fuzz_eval, fuzz_compile and fuzz_regexp.
-The above build command will produce an executable binary for each of them, which can be
-simply executed as:
+Currently, there are seven fuzzing targets defined: fuzz_eval, fuzz_compile,
+fuzz_bytecode, fuzz_json, fuzz_regexp, fuzz_regexp_compile and
+fuzz_module_export. The above build command will produce an executable binary
+for each of them in build/, which can be simply executed as:
 
-  ./fuzz_eval
+  ./build/fuzz_eval
 
 or with an initial corpus:
 
-  ./fuzz_compile corpus_dir/
+  ./build/fuzz_compile corpus_dir/
 
 or with a predefined dictionary to improve its efficacy:
 
-  ./fuzz_eval -dict fuzz/fuzz.dict
+  ./build/fuzz_eval -dict fuzz/fuzz.dict
 
 or with arbitrary CLI arguments provided by libFuzzer (https://llvm.org/docs/LibFuzzer.html).

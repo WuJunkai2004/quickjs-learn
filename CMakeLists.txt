@@ -111,6 +111,26 @@ target_link_libraries(qjsc PRIVATE ${QUICKJS_LIBS})
 add_executable(run-test262 EXCLUDE_FROM_ALL run-test262.c)
 target_link_libraries(run-test262 PRIVATE ${QUICKJS_LIBS})
 
+# ---- libFuzzer targets (Makefile: `make libfuzzer`) ----
+# 默认 OFF：这些目标只用于健壮性测试，且需要 clang 的 libFuzzer 运行时。
+# 开启： cmake -B build -DQUICKJS_FUZZER=ON -DCMAKE_C_COMPILER=clang
+option(QUICKJS_FUZZER "Build the libFuzzer targets (requires clang)" OFF)
+if(QUICKJS_FUZZER)
+  set(FUZZ_TARGETS fuzz_bytecode fuzz_compile fuzz_eval fuzz_json
+                   fuzz_module_export fuzz_regexp fuzz_regexp_compile)
+  foreach(t ${FUZZ_TARGETS})
+    add_executable(${t} fuzz/${t}.c fuzz/fuzz_common.c)
+    # fuzz_common.h 以 "fuzz/fuzz_common.h" 的形式被 include，需要仓库根
+    target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(${t} PRIVATE -fsanitize=fuzzer-no-link -g)
+    target_link_options(${t} PRIVATE -fsanitize=fuzzer)
+    target_link_libraries(${t} PRIVATE ${QUICKJS_LIBS})
+    # LTO 会重做 codegen，与 libFuzzer 的覆盖率插桩组合容易出问题，且 fuzz
+    # 场景不需要跨模块优化
+    set_target_properties(${t} PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+  endforeach()
+endif()
+
 # ---- tests (Makefile `make test` equivalent) ----
 enable_testing()
 set(QJS $<TARGET_FILE:qjs>)
