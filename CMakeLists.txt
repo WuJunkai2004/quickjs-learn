@@ -38,8 +38,18 @@ add_compile_options(
 # 中间结果留在 80 位 x87 寄存器里不按 double 舍入，date.c set_date_fields()
 # 里 volatile 只保护了加数、保护不了累加器，导致 Date.UTC 求值顺序失效
 # （test262 fp-evaluation-order，见 tests/test_builtin.js）。
-# 探测式：只在 32 位 x86 且编译器认这两个标志时启用，非 x86 不用也用不了。
-if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(i[3-6]86|x86|X86)$")
+# 直接探测"编译器是否用扩展精度求值 double"（FLT_EVAL_METHOD == 2），而不是
+# 猜处理器名：-m32 构建时 CMAKE_SYSTEM_PROCESSOR 仍是宿主的 x86_64，按名字
+# 判断会漏掉这正是要处理的场景。开启 SSE 数学后再补一次标志探测，非 x86
+# 编译器认不下这两个标志，自然不会误加。
+check_c_source_compiles("
+#include <float.h>
+#if FLT_EVAL_METHOD != 2
+#error double is not evaluated with excess precision
+#endif
+int main(void) { return 0; }
+" HAVE_EXCESS_PRECISION)
+if(HAVE_EXCESS_PRECISION)
   include(CheckCCompilerFlag)
   check_c_compiler_flag("-msse2 -mfpmath=sse" HAVE_SSE2_FPMATH)
   if(HAVE_SSE2_FPMATH)
