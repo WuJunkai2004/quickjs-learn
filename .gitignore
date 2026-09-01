@@ -20,10 +20,14 @@ qjscalc.c
 repl.c
 run-test262
 run-test262.exe
-test262
-test262_*.txt
-test262o
-test262o_*.txt
+# test262 / test262o 套件本体（CI 克隆到 ecma262/ 下），以及运行产生的报告
+ecma262/test262
+ecma262/test262_*.txt
+ecma262/test262o
+ecma262/test262o_*.txt
+# 但基线错误清单必须入库：CI 靠它判定 new/changed/fixed 回归
+!ecma262/test262_errors.txt
+!ecma262/test262o_errors.txt
 unicode
 unicode_gen
 run_octane

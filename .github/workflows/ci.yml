@@ -137,15 +137,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Bootstrap test262 suite
-        # 版本固定（原 Makefile TEST262_COMMIT），与 test262_errors.txt 基线对齐
+        # 版本固定（原 Makefile TEST262_COMMIT），与 ecma262/test262_errors.txt 基线对齐
         run: |
-          git clone --single-branch --shallow-since=2025-09-01 https://github.com/tc39/test262.git
-          cd test262 && git checkout -q 5c8206929d81b2d3d727ca6aac56c18358c8d790 && patch -p1 < ../tests/test262.patch
+          git clone --single-branch --shallow-since=2025-09-01 https://github.com/tc39/test262.git ecma262/test262
+          cd ecma262/test262 && git checkout -q 5c8206929d81b2d3d727ca6aac56c18358c8d790 && patch -p1 < ../../ecma262/test262.patch
       - name: Build run-test262
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --target run-test262 -j$(getconf _NPROCESSORS_ONLN)
       - name: Run test262
-        # 退出码非 0 即出现 new/changed/fixed（相对 test262_errors.txt 的回归）
+        # 退出码非 0 即出现 new/changed/fixed（相对 ecma262/test262_errors.txt 的回归）
         run: |
-          ./build/run-test262 -t -m -c test262.conf -a
+          ./build/run-test262 -t -m -c ecma262/test262.conf -a

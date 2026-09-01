@@ -74,7 +74,7 @@ add_library(quickjs STATIC
 )
 # include/ 存放全部头（quickjs.h 公共 API + 内部头 + builtins/ 子结构）；
 # 无系统头同名文件（string.h 隐患已改名 cstring.h / jstring.h），
-# 故 -I include 安全。根目录入口（qjs.c/qjsc.c/run-test262.c）通过链接
+# 故 -I include 安全。根目录入口（qjs.c/qjsc.c/ecma262/run-test262.c）通过链接
 # 本库获得 PUBLIC include path 解析 quickjs.h/cutils.h 等。
 target_include_directories(quickjs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -108,7 +108,7 @@ target_compile_definitions(qjsc PRIVATE
 target_link_libraries(qjsc PRIVATE ${QUICKJS_LIBS})
 
 # ---- run-test262 (optional; cmake --build build --target run-test262) ----
-add_executable(run-test262 EXCLUDE_FROM_ALL run-test262.c)
+add_executable(run-test262 EXCLUDE_FROM_ALL ecma262/run-test262.c)
 target_link_libraries(run-test262 PRIVATE ${QUICKJS_LIBS})
 
 # ---- libFuzzer targets (Makefile: `make libfuzzer`) ----
